@@ -1,6 +1,8 @@
 {
     "name": "github-stats",
     "private": true,
+    "version": "1.0.0",
+    "description": "Dynamic GitHub repository and account SVG statistics",
     "scripts": {
         "dev": "wrangler dev",
         "deploy": "wrangler deploy"
