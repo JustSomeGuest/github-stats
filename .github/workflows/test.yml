@@ -1,6 +1,6 @@
 name: Generate Stats
 
-on:
+"on":
   workflow_dispatch:
     inputs:
       username:
