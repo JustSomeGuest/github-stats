@@ -3,18 +3,25 @@ import os
 import re
 import sys
 import urllib.request
+import urllib.error
 from urllib.parse import quote
 
 if len(sys.argv) < 2:
-    print("Usage: python generate.py <github-username>")
+    print("Usage: python generate.py <username>")
     sys.exit(1)
 
-username = sys.argv[1]
+username = sys.argv[1].strip()
+
+if not username:
+    print("Username cannot be empty.")
+    sys.exit(1)
+
 token = os.getenv("GITHUB_TOKEN")
 
 headers = {
     "Accept": "application/vnd.github+json",
-    "User-Agent": "GitHub-Stats-Generator"
+    "User-Agent": "GitHub-Stats",
+    "X-GitHub-Api-Version": "2022-11-28",
 }
 
 if token:
@@ -24,8 +31,13 @@ if token:
 def request(url):
     req = urllib.request.Request(url, headers=headers)
 
-    with urllib.request.urlopen(req) as response:
-        return json.load(response), response.headers
+    try:
+        with urllib.request.urlopen(req, timeout=30) as response:
+            return json.load(response), response.headers
+    except urllib.error.HTTPError as error:
+        if error.code in (404, 409, 422):
+            return None, error.headers
+        raise
 
 
 def get_repositories():
@@ -33,10 +45,12 @@ def get_repositories():
     page = 1
 
     while True:
-        data, _ = request(
+        url = (
             f"https://api.github.com/users/{quote(username)}/repos"
-            f"?type=owner&sort=updated&per_page=100&page={page}"
+            f"?type=owner&per_page=100&page={page}"
         )
+
+        data, _ = request(url)
 
         if not data:
             break
@@ -53,16 +67,20 @@ def get_commit_count(repo):
         "/commits?per_page=1"
     )
 
-    data, headers = request(url)
+    data, response_headers = request(url)
 
     if not data:
         return 0
 
-    link = headers.get("Link", "")
-    match = re.search(r"[?&]page=(\d+)[^>]*>;?\s*rel=\"last\"", link)
+    link = response_headers.get("Link", "")
 
-    if match:
-        return int(match.group(1))
+    last_page = re.search(
+        r'page=(\d+)[^>]*>\s*;\s*rel="last"',
+        link
+    )
+
+    if last_page:
+        return int(last_page.group(1))
 
     return len(data)
 
@@ -75,9 +93,12 @@ def get_file_count(repo, branch):
 
     data, _ = request(url)
 
+    if not data:
+        return 0
+
     return sum(
-        item["type"] == "blob"
-        for item in data.get("tree", [])
+        1 for item in data.get("tree", [])
+        if item["type"] == "blob"
     )
 
 
@@ -89,6 +110,8 @@ def main():
     total_stars = 0
     total_forks = 0
     projects = []
+
+    print(f"Scanning {username}...")
 
     for repo in repositories:
         name = repo["name"]
@@ -112,7 +135,7 @@ def main():
             "forks": repo["forks_count"],
         })
 
-        print(f"{name}: {commits} commits, {files} files")
+        print(f"{name}: {commits} commits | {files} files")
 
     stats = {
         "username": username,
@@ -129,8 +152,13 @@ def main():
     with open("output/stats.json", "w", encoding="utf-8") as file:
         json.dump(stats, file, indent=4)
 
-    print("\nStats generated successfully.")
-    print(json.dumps(stats, indent=4))
+    print("\nStatistics:")
+    print(f"Repositories: {len(repositories):,}")
+    print(f"Commits:    {total_commits:,}")
+    print(f"Files:      {total_files:,}")
+    print(f"Stars:      {total_stars:,}")
+    print(f"Forks:      {total_forks:,}")
+    print("\nStats saved to output/stats.json")
 
 
 if __name__ == "__main__":
