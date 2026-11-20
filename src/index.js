@@ -1,13 +1,7 @@
-
 const API = "https://api.github.com";
-const CACHE = caches.default;
-
-const CARD_TTL = 3600;
-const STALE_TTL = 604800;
-const API_TTL = 3600;
 
 const HEADERS = {
-    "User-Agent": "github-stats-worker",
+    "User-Agent": "github-stats",
     "Accept": "application/vnd.github+json",
     "X-GitHub-Api-Version": "2022-11-28"
 };
@@ -60,9 +54,9 @@ function iconFor(type) {
 }
 
 function renderSvg(label, value, type) {
-    const displayValue = formatNumber(value);
     const safeLabel = escapeXml(label);
-    const safeValue = escapeXml(displayValue);
+    const safeValue = escapeXml(formatNumber(value));
+
     const width = Math.max(
         170,
         Math.min(320, 66 + Math.max(safeLabel.length, safeValue.length) * 7)
@@ -75,8 +69,8 @@ function renderSvg(label, value, type) {
         <stop offset="100%" stop-color="#0b1220"/>
     </linearGradient>
 </defs>
-<rect width="${width}" height="74" rx="10" fill="url(#bg)" stroke="#26364d"/>
-<rect width="3" height="74" rx="2" fill="#5794ff"/>
+<rect width="${width}" height="74" fill="url(#bg)" stroke="#26364d"/>
+<rect width="3" height="74" fill="#5794ff"/>
 <g transform="translate(16 20)" color="#5794ff">
     <svg width="22" height="22" viewBox="0 0 24 24">${iconFor(type)}</svg>
 </g>
@@ -85,82 +79,92 @@ function renderSvg(label, value, type) {
 </svg>`;
 }
 
-function svgResponse(svg, cache = true) {
-    return new Response(svg, {
+function svgResponse(label, value, type) {
+    return new Response(renderSvg(label, value, type), {
         headers: {
             "Content-Type": "image/svg+xml; charset=utf-8",
-            "Cache-Control": cache
-                ? `public, max-age=${CARD_TTL}, stale-while-revalidate=${STALE_TTL}`
-                : "no-store",
+            "Cache-Control": "public, max-age=300",
             "Access-Control-Allow-Origin": "*"
         }
     });
 }
 
-function cacheKey(baseUrl, namespace, pathOverride = null) {
-    const url = new URL(baseUrl);
-    url.pathname = pathOverride || `/__cache/${namespace}${url.pathname}`;
-
-    return new Request(url.toString(), { method: "GET" });
-}
-
-async function cachedFetch(url, ttl = API_TTL) {
-    const freshKey = cacheKey(url, "github-fresh");
-    const staleKey = cacheKey(url, "github-stale");
-
-    try {
-        const cached = await CACHE.match(freshKey);
-        if (cached) return cached;
-    } catch {}
-
-    try {
-        const response = await fetch(url, { headers: HEADERS });
-
-        if (response.ok) {
-            const fresh = response.clone();
-            const stale = response.clone();
-
-            fresh.headers.set("Cache-Control", `public, max-age=${ttl}`);
-            stale.headers.set("Cache-Control", `public, max-age=${STALE_TTL}`);
-
-            await Promise.allSettled([
-                CACHE.put(freshKey, fresh),
-                CACHE.put(staleKey, stale)
-            ]);
-
-            return response;
-        }
-
-        if (response.status === 403 || response.status === 429) {
-            const stale = await CACHE.match(staleKey);
-            if (stale) return stale;
-        }
-
-        return response;
-    } catch (error) {
-        const stale = await CACHE.match(staleKey);
-        if (stale) return stale;
-
-        throw error;
-    }
-}
-
 async function github(path) {
-    const response = await cachedFetch(`${API}${path}`);
+    const response = await fetch(`${API}${path}`, {
+        headers: HEADERS
+    });
 
     if (!response.ok) {
+        const remaining = response.headers.get("X-RateLimit-Remaining");
+        const reset = response.headers.get("X-RateLimit-Reset");
+        const body = await response.text();
+
         if (response.status === 403 || response.status === 429) {
-            throw new Error("GitHub API rate limit reached. No cached data is available yet.");
+            throw new Error(
+                `GitHub rate limit reached. Remaining: ${remaining ?? "unknown"}. Reset: ${reset ?? "unknown"}.`
+            );
         }
 
         if (response.status === 404) {
             throw new Error("GitHub resource not found.");
         }
 
-        throw new Error(`GitHub API returned ${response.status}.`);
+        throw new Error(
+            `GitHub API returned ${response.status}: ${body.slice(0, 300)}`
+        );
     }
 
     return response.json();
+}
+
+async function getRepo(username, repo) {
+    return github(
+        `/repos/${encodeURIComponent(username)}/${encodeURIComponent(repo)}`
+    );
+}
+
+async function getCommitCount(username, repo) {
+    const response = await fetch(
+        `${API}/repos/${encodeURIComponent(username)}/${encodeURIComponent(repo)}/commits?per_page=1`,
+        { headers: HEADERS }
+    );
+
+    if (response.status === 409) return 0;
+
+    if (!response.ok) {
+        const remaining = response.headers.get("X-RateLimit-Remaining");
+        const reset = response.headers.get("X-RateLimit-Reset");
+
+        throw new Error(
+            `GitHub commits API returned ${response.status}. Remaining: ${remaining ?? "unknown"}. Reset: ${reset ?? "unknown"}.`
+        );
+    }
+
+    const link = response.headers.get("Link") || "";
+    const lastPage = link.match(/[?&]page=(\d+)[^>]*rel="last"/);
+
+    if (lastPage) {
+        return Number(lastPage[1]);
+    }
+
+    const data = await response.json();
+    return Array.isArray(data) ? data.length : 0;
+}
+
+async function getFileCount(username, repo, branch) {
+    const tree = await github(
+        `/repos/${encodeURIComponent(username)}/${encodeURIComponent(repo)}/git/trees/${encodeURIComponent(branch)}?recursive=1`
+    );
+
+    if (!Array.isArray(tree.tree)) {
+        throw new Error("Could not read repository file tree.");
+    }
+
+    if (tree.truncated) {
+        throw new Error("GitHub truncated this repository's file tree.");
+    }
+
+    return tree.tree.filter(item => item.type === "blob").length;
 }
 
 async function getRepositories(username) {
@@ -172,62 +176,17 @@ async function getRepositories(username) {
         );
 
         if (!Array.isArray(data)) {
-            throw new Error("Unexpected GitHub API response.");
+            throw new Error("Unexpected GitHub repositories response.");
         }
 
         repos.push(...data);
 
-        if (data.length < 100) return repos;
-    }
-
-    throw new Error(
-        "This account has more than 1,000 public repositories; account totals are not supported for that size."
-    );
-}
-
-async function getCommitCount(owner, repo) {
-    const url = `${API}/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/commits?per_page=1`;
-    const response = await cachedFetch(url);
-
-    if (!response.ok) {
-        if (response.status === 409) return 0;
-
-        if (response.status === 403 || response.status === 429) {
-            throw new Error("GitHub API rate limit reached. No cached commit data is available.");
+        if (data.length < 100) {
+            return repos;
         }
-
-        throw new Error(`Could not fetch commits (${response.status}).`);
     }
 
-    const link = response.headers.get("Link") || "";
-    const lastPage = link.match(/[?&]page=(\d+)[^>]*rel="last"/);
-
-    if (lastPage) return Number(lastPage[1]);
-
-    const data = await response.json();
-    return Array.isArray(data) ? data.length : 0;
-}
-
-async function getFileCount(owner, repo, branch) {
-    const tree = await github(
-        `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/git/trees/${encodeURIComponent(branch)}?recursive=1`
-    );
-
-    if (!Array.isArray(tree.tree)) {
-        throw new Error("Could not read repository tree.");
-    }
-
-    if (tree.truncated) {
-        throw new Error("GitHub truncated this repository's file tree; file count may be incomplete.");
-    }
-
-    return tree.tree.filter(item => item.type === "blob").length;
-}
-
-async function getRepo(owner, repo) {
-    return github(
-        `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}`
-    );
+    throw new Error("Account has more than 1,000 public repositories.");
 }
 
 async function runLimited(items, limit, callback) {
@@ -254,7 +213,7 @@ async function runLimited(items, limit, callback) {
     return results;
 }
 
-async function calculateTotals(username) {
+async function getTotals(username) {
     const repos = await getRepositories(username);
 
     const totals = {
@@ -287,107 +246,6 @@ async function calculateTotals(username) {
     return totals;
 }
 
-async function getTotals(username, requestUrl) {
-    const safeUsername = encodeURIComponent(username.toLowerCase());
-    const base = new URL(requestUrl);
-
-    const totalsUrl = new URL(
-        `/__cache/account-totals/${safeUsername}`,
-        base.origin
-    ).toString();
-
-    const freshKey = cacheKey(
-        totalsUrl,
-        "unused",
-        `/__cache/account-totals-fresh/${safeUsername}`
-    );
-
-    const staleKey = cacheKey(
-        totalsUrl,
-        "unused",
-        `/__cache/account-totals-stale/${safeUsername}`
-    );
-
-    try {
-        const cached = await CACHE.match(freshKey);
-        if (cached) return cached.json();
-    } catch {}
-
-    try {
-        const totals = await calculateTotals(username);
-
-        const response = new Response(JSON.stringify(totals), {
-            headers: {
-                "Content-Type": "application/json",
-                "Cache-Control": `public, max-age=${CARD_TTL}`
-            }
-        });
-
-        const stale = response.clone();
-        stale.headers.set("Cache-Control", `public, max-age=${STALE_TTL}`);
-
-        await Promise.allSettled([
-            CACHE.put(freshKey, response.clone()),
-            CACHE.put(staleKey, stale)
-        ]);
-
-        return totals;
-    } catch (error) {
-        try {
-            const stale = await CACHE.match(staleKey);
-            if (stale) return stale.json();
-        } catch {}
-
-        throw error;
-    }
-}
-
-async function cachedCard(request, label, type, getValue) {
-    const url = new URL(request.url);
-
-    const freshKey = cacheKey(
-        request.url,
-        "unused",
-        `/__cache/cards-fresh${url.pathname}${url.search}`
-    );
-
-    const staleKey = cacheKey(
-        request.url,
-        "unused",
-        `/__cache/cards-stale${url.pathname}${url.search}`
-    );
-
-    try {
-        const cached = await CACHE.match(freshKey);
-        if (cached) return cached;
-    } catch {}
-
-    try {
-        const value = await getValue();
-        const response = svgResponse(renderSvg(label, value, type));
-
-        const stale = response.clone();
-        stale.headers.set("Cache-Control", `public, max-age=${STALE_TTL}`);
-
-        await Promise.allSettled([
-            CACHE.put(freshKey, response.clone()),
-            CACHE.put(staleKey, stale)
-        ]);
-
-        return response;
-    } catch (error) {
-        try {
-            const stale = await CACHE.match(staleKey);
-            if (stale) return stale;
-        } catch {}
-
-        return svgResponse(
-            renderSvg(label, "Unavailable", type),
-            false
-        );
-    }
-}
-
 async function handleRequest(request) {
     const url = new URL(request.url);
     const path = url.pathname.replace(/\/+$/, "") || "/";
@@ -417,7 +275,10 @@ async function handleRequest(request) {
 
     if (path.startsWith("/repo/")) {
         if (!username || !repo) {
-            return json({ error: "username and repo are required." }, 400);
+            return json(
+                { error: "username and repo are required." },
+                400
+            );
         }
 
         const type = path.split("/")[2];
@@ -430,35 +291,46 @@ async function handleRequest(request) {
                 return json({ error: "text is required." }, 400);
             }
 
-            return svgResponse(
-                renderSvg(label, text, "custom"),
-                false
-            );
+            return svgResponse(label, text, "custom");
         }
 
         if (!["commits", "files", "stars", "forks"].includes(type)) {
             return json({ error: "Unknown endpoint." }, 404);
         }
 
-        const labels = {
-            commits: "Commits",
-            files: "Files",
-            stars: "Stars",
-            forks: "Forks"
-        };
-
-        return cachedCard(request, labels[type], type, async () => {
+        try {
             const data = await getRepo(username, repo);
 
-            if (type === "stars") return data.stargazers_count ?? 0;
-            if (type === "forks") return data.forks_count ?? 0;
+            const labels = {
+                commits: "Commits",
+                files: "Files",
+                stars: "Stars",
+                forks: "Forks"
+            };
 
-            if (type === "files") {
-                return getFileCount(username, repo, data.default_branch);
+            let value;
+
+            if (type === "stars") {
+                value = data.stargazers_count ?? 0;
+            } else if (type === "forks") {
+                value = data.forks_count ?? 0;
+            } else if (type === "files") {
+                value = await getFileCount(
+                    username,
+                    repo,
+                    data.default_branch
+                );
+            } else {
+                value = await getCommitCount(username, repo);
             }
 
-            return getCommitCount(username, repo);
-        });
+            return svgResponse(labels[type], value, type);
+        } catch (error) {
+            return json({
+                error: error.message || "Unable to fetch repository statistics.",
+                endpoint: path
+            }, 503);
+        }
     }
 
     if (path.startsWith("/account/")) {
@@ -476,10 +348,7 @@ async function handleRequest(request) {
                 return json({ error: "text is required." }, 400);
             }
 
-            return svgResponse(
-                renderSvg(label, text, "custom"),
-                false
-            );
+            return svgResponse(label, text, "custom");
         }
 
         const types = {
@@ -494,20 +363,25 @@ async function handleRequest(request) {
             return json({ error: "Unknown endpoint." }, 404);
         }
 
-        const key = types[type];
+        try {
+            const totals = await getTotals(username);
+            const key = types[type];
 
-        const labels = {
-            commits: "Total commits",
-            files: "Total files",
-            stars: "Total stars",
-            forks: "Total forks",
-            repos: "Repositories"
-        };
+            const labels = {
+                commits: "Total commits",
+                files: "Total files",
+                stars: "Total stars",
+                forks: "Total forks",
+                repos: "Repositories"
+            };
 
-        return cachedCard(request, labels[key], key, async () => {
-            const totals = await getTotals(username, request.url);
-            return totals[key];
-        });
+            return svgResponse(labels[key], totals[key], key);
+        } catch (error) {
+            return json({
+                error: error.message || "Unable to fetch account statistics.",
+                endpoint: path
+            }, 503);
+        }
     }
 
     return json({ error: "Endpoint not found." }, 404);
@@ -525,10 +399,9 @@ export default {
         try {
             return await handleRequest(request);
         } catch (error) {
-            return json(
-                { error: error.message || "Internal error." },
-                500
-            );
+            return json({
+                error: error.message || "Internal error."
+            }, 500);
         }
     }
 };
