@@ -52,28 +52,31 @@ function iconFor(type) {
     return icons[type] || icons.custom;
 }
 
-function renderSvg(label, value, type) {
+function renderSvg(label, value, type, iconUrl = null) {
     const safeLabel = escapeXml(label);
     const safeValue = escapeXml(formatNumber(value));
+    const safeIconUrl = iconUrl ? escapeXml(iconUrl) : null;
 
     const width = Math.max(
         150,
         16 + 18 + 12 + safeLabel.length * 7.2 + 10 + safeValue.length * 8.2 + 16
     );
 
+    const icon = safeIconUrl
+        ? `<image href="${safeIconUrl}" x="12" y="11" width="18" height="18" preserveAspectRatio="xMidYMid meet"/>`
+        : `<g transform="translate(12 11)" color="#5794ff"><svg width="18" height="18" viewBox="0 0 24 24">${iconFor(type)}</svg></g>`;
+
     return `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="40" viewBox="0 0 ${width} 40">
 <rect width="${width}" height="40" fill="#101827" stroke="#26364d"/>
 <rect width="3" height="40" fill="#5794ff"/>
-<g transform="translate(12 11)" color="#5794ff">
-    <svg width="18" height="18" viewBox="0 0 24 24">${iconFor(type)}</svg>
-</g>
+${icon}
 <text x="42" y="25" font-family="Segoe UI,Arial,sans-serif" font-size="13" fill="#a5b4cc">${safeLabel}</text>
 <text x="${42 + safeLabel.length * 7.2 + 8}" y="25" font-family="Segoe UI,Arial,sans-serif" font-size="14" font-weight="700" fill="#e6edf7">${safeValue}</text>
 </svg>`;
 }
 
-function svgResponse(label, value, type) {
-    return new Response(renderSvg(label, value, type), {
+function svgResponse(label, value, type, iconUrl = null) {
+    return new Response(renderSvg(label, value, type, iconUrl), {
         headers: {
             "Content-Type": "image/svg+xml; charset=utf-8",
             "Cache-Control": "public, max-age=300",
@@ -85,6 +88,7 @@ function svgResponse(label, value, type) {
 function customResponse(url) {
     const text = url.searchParams.get("text");
     const label = url.searchParams.get("label");
+    const icon = url.searchParams.get("icon");
 
     if (text === null) {
         return json({ error: "text is required." }, 400);
@@ -94,7 +98,18 @@ function customResponse(url) {
         return json({ error: "label is required." }, 400);
     }
 
-    return svgResponse(label, text, "custom");
+    if (icon) {
+        try {
+            const parsed = new URL(icon);
+            if (parsed.protocol !== "https:") {
+                return json({ error: "icon must be an HTTPS URL." }, 400);
+            }
+        } catch {
+            return json({ error: "Invalid icon URL." }, 400);
+        }
+    }
+
+    return svgResponse(label, text, "custom", icon);
 }
 
 function bytesToBase64(bytes) {
