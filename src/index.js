@@ -203,9 +203,29 @@ function setupPage() {
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>GitHub Stats Setup</title>
 <style>
-*{box-sizing:border-box}body{margin:0;min-height:100vh;background:#0b1220;color:#e6edf7;font:14px Segoe UI,Arial,sans-serif;display:grid;place-items:center;padding:24px}
-main{width:min(100%,420px);border:1px solid #26364d;background:#101827;padding:24px}
-h1{font-size:20px;margin:0 0 8px}p{color:#8998b5;line-height:1.5;margin:0 0 20px}label{display:block;margin:14px 0 6px;color:#c4d0e3}input{width:100%;padding:11px;background:#0b1220;border:1px solid #34445e;color:#e6edf7;font:inherit;outline:none}input:focus{border-color:#5794ff}button{margin-top:18px;width:100%;padding:11px;border:0;background:#5794ff;color:#07111f;font-weight:700;font-size:14px;cursor:pointer}button:disabled{opacity:.6;cursor:wait}small{display:block;color:#8998b5;line-height:1.5;margin-top:14px}pre{white-space:pre-wrap;overflow-wrap:anywhere;background:#0b1220;border:1px solid #26364d;padding:12px;color:#c4d0e3;display:none;margin-top:16px}#status{margin-top:14px;color:#c4d0e3;overflow-wrap:anywhere}
+*{box-sizing:border-box}
+body{margin:0;min-height:100vh;background:#0b1220;color:#e6edf7;font:14px Segoe UI,Arial,sans-serif;display:grid;place-items:center;padding:24px}
+main{width:min(100%,480px);border:1px solid #26364d;background:#101827;padding:24px}
+h1{font-size:20px;margin:0 0 8px}
+p{color:#8998b5;line-height:1.5;margin:0 0 20px}
+h2{font-size:15px;margin:0 0 14px;color:#e6edf7}
+.tutorial{border:1px solid #26364d;background:#0b1220;padding:16px;margin:20px 0}
+.steps{list-style:none;padding:0;margin:0;counter-reset:step}
+.steps li{position:relative;padding:0 0 14px 34px;color:#c4d0e3;line-height:1.5;counter-increment:step}
+.steps li:last-child{padding-bottom:0}
+.steps li:before{content:counter(step);position:absolute;left:0;top:0;width:22px;height:22px;display:grid;place-items:center;background:#1b2b43;border:1px solid #34445e;color:#80aaff;font-size:12px;font-weight:700}
+.steps strong{color:#e6edf7}
+.steps a{color:#80aaff}
+.steps code{font-family:Consolas,monospace;color:#80aaff;background:#17243a;padding:2px 4px}
+.note{border-left:2px solid #5794ff;padding:9px 11px;margin-top:16px;background:#111f33;color:#a5b4cc;font-size:12px;line-height:1.5}
+label{display:block;margin:14px 0 6px;color:#c4d0e3}
+input{width:100%;padding:11px;background:#0b1220;border:1px solid #34445e;color:#e6edf7;font:inherit;outline:none}
+input:focus{border-color:#5794ff}
+button{margin-top:18px;width:100%;padding:11px;border:0;background:#5794ff;color:#07111f;font-weight:700;font-size:14px;cursor:pointer}
+button:disabled{opacity:.6;cursor:wait}
+small{display:block;color:#8998b5;line-height:1.5;margin-top:14px}
+pre{white-space:pre-wrap;overflow-wrap:anywhere;background:#0b1220;border:1px solid #26364d;padding:12px;color:#c4d0e3;display:none;margin-top:16px}
+#status{margin-top:14px;color:#c4d0e3;overflow-wrap:anywhere}
 a{color:#80aaff}
 </style>
 </head>
@@ -213,6 +233,23 @@ a{color:#80aaff}
 <main>
 <h1>GitHub Stats Setup</h1>
 <p>Create a fine-grained GitHub token with read-only access to public repositories. Your token is encrypted before it is stored and is never put in your image URLs.</p>
+
+<section class="tutorial">
+<h2>How to create your GitHub token</h2>
+<ol class="steps">
+<li>Open <a href="https://github.com/settings" target="_blank" rel="noopener noreferrer">GitHub Settings</a>.</li>
+<li>Scroll down and open <strong>Developer settings</strong>.</li>
+<li>Go to <strong>Personal access tokens</strong>, then <strong>Fine-grained tokens</strong>.</li>
+<li>Click <strong>Generate new token</strong>.</li>
+<li>Set the token name to whatever you want.</li>
+<li>Set <strong>Expiration</strong> to <strong>No expiration</strong>.</li>
+<li>Under <strong>Repository access</strong>, select <strong>Public repositories</strong> (<strong>Read-only access to public repositories</strong>).</li>
+<li>Click <strong>Generate token</strong>, copy the token, and save it somewhere secure.</li>
+<li>Paste the token into the field below and submit the form.</li>
+</ol>
+<div class="note">Only select public repository read-only access. Do not grant access to private repositories or additional permissions. If GitHub does not offer No expiration, choose an expiration allowed by your account or organization.</div>
+</section>
+
 <form id="form">
 <label for="username">GitHub username</label>
 <input id="username" name="username" autocomplete="username" required maxlength="39" pattern="[A-Za-z0-9-]+">
@@ -220,7 +257,8 @@ a{color:#80aaff}
 <input id="token" name="token" type="password" autocomplete="off" required>
 <button id="submit" type="submit">Save token</button>
 </form>
-<small>Grant read-only access to repository metadata and contents. Tokens are encrypted with AES-GCM and automatically expire after 90 days. Anyone who can see your public README can reuse its generated ID to request your public stats, but cannot recover your token.</small>
+
+<small>Your token is encrypted with AES-GCM before being stored. The generated setup ID and its encrypted token record expire after 90 days. This is separate from your GitHub token's expiration setting. Anyone who can see your public README can reuse its generated ID to request your public stats, but cannot recover your token.</small>
 <div id="status" role="status"></div>
 <pre id="result"></pre>
 </main>
