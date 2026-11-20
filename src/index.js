@@ -381,9 +381,9 @@ async function cachedCard(request, label, type, getValue) {
             if (stale) return stale;
         } catch {}
 
-        return json(
-            { error: error.message || "Unable to generate this card." },
-            503
+        return svgResponse(
+            renderSvg(label, "Unavailable", type),
+            false
         );
     }
 }
