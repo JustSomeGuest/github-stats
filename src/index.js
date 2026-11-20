@@ -1,6 +1,7 @@
 const API = "https://api.github.com";
+const TOKEN_TTL = 60 * 60 * 24 * 90;
 
-const HEADERS = {
+const BASE_HEADERS = {
     "User-Agent": "github-stats",
     "Accept": "application/vnd.github+json",
     "X-GitHub-Api-Version": "2022-11-28"
@@ -32,7 +33,6 @@ function formatNumber(value) {
     }
 
     const numeric = Number(value);
-
     if (String(value ?? "").trim() !== "" && Number.isFinite(numeric)) {
         return numeric.toLocaleString("en-US");
     }
@@ -56,26 +56,14 @@ function iconFor(type) {
 function renderSvg(label, value, type) {
     const safeLabel = escapeXml(label);
     const safeValue = escapeXml(formatNumber(value));
+    const width = Math.max(112, Math.min(230, 43 + safeLabel.length * 5.3 + safeValue.length * 6.8));
 
-    const width = Math.max(
-        170,
-        Math.min(320, 66 + Math.max(safeLabel.length, safeValue.length) * 7)
-    );
-
-    return `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="74" viewBox="0 0 ${width} 74">
-<defs>
-    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
-        <stop offset="0%" stop-color="#101827"/>
-        <stop offset="100%" stop-color="#0b1220"/>
-    </linearGradient>
-</defs>
-<rect width="${width}" height="74" fill="url(#bg)" stroke="#26364d"/>
-<rect width="3" height="74" fill="#5794ff"/>
-<g transform="translate(16 20)" color="#5794ff">
-    <svg width="22" height="22" viewBox="0 0 24 24">${iconFor(type)}</svg>
-</g>
-<text x="48" y="28" font-family="Segoe UI,Arial,sans-serif" font-size="11" fill="#8998b5">${safeLabel}</text>
-<text x="48" y="51" font-family="Segoe UI,Arial,sans-serif" font-size="19" font-weight="600" fill="#e6edf7">${safeValue}</text>
+    return `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="32" viewBox="0 0 ${width} 32">
+<rect width="${width}" height="32" fill="#101827" stroke="#26364d"/>
+<rect width="2" height="32" fill="#5794ff"/>
+<g transform="translate(8 8)" color="#5794ff"><svg width="16" height="16" viewBox="0 0 24 24">${iconFor(type)}</svg></g>
+<text x="31" y="13" font-family="Segoe UI,Arial,sans-serif" font-size="8.5" fill="#8998b5">${safeLabel}</text>
+<text x="31" y="25" font-family="Segoe UI,Arial,sans-serif" font-size="11" font-weight="600" fill="#e6edf7">${safeValue}</text>
 </svg>`;
 }
 
@@ -89,9 +77,197 @@ function svgResponse(label, value, type) {
     });
 }
 
-async function github(path) {
+function bytesToBase64(bytes) {
+    let binary = "";
+    for (const byte of bytes) binary += String.fromCharCode(byte);
+    return btoa(binary);
+}
+
+function base64ToBytes(value) {
+    const binary = atob(value);
+    return Uint8Array.from(binary, character => character.charCodeAt(0));
+}
+
+async function getEncryptionKey(env) {
+    if (!env.TOKEN_ENCRYPTION_KEY) {
+        throw new Error("TOKEN_ENCRYPTION_KEY secret is not configured.");
+    }
+
+    const raw = base64ToBytes(env.TOKEN_ENCRYPTION_KEY);
+    if (raw.length !== 32) {
+        throw new Error("TOKEN_ENCRYPTION_KEY must be a base64-encoded 32-byte key.");
+    }
+
+    return crypto.subtle.importKey("raw", raw, "AES-GCM", false, ["encrypt", "decrypt"]);
+}
+
+async function encryptCredentials(credentials, env) {
+    const key = await getEncryptionKey(env);
+    const iv = crypto.getRandomValues(new Uint8Array(12));
+    const plaintext = new TextEncoder().encode(JSON.stringify(credentials));
+    const ciphertext = await crypto.subtle.encrypt({ name: "AES-GCM", iv }, key, plaintext);
+
+    return JSON.stringify({
+        version: 1,
+        iv: bytesToBase64(iv),
+        data: bytesToBase64(new Uint8Array(ciphertext))
+    });
+}
+
+async function decryptCredentials(record, env) {
+    const parsed = JSON.parse(record);
+    if (parsed.version !== 1 || !parsed.iv || !parsed.data) {
+        throw new Error("Stored token record is invalid.");
+    }
+
+    const key = await getEncryptionKey(env);
+    const plaintext = await crypto.subtle.decrypt(
+        { name: "AES-GCM", iv: base64ToBytes(parsed.iv) },
+        key,
+        base64ToBytes(parsed.data)
+    );
+
+    return JSON.parse(new TextDecoder().decode(plaintext));
+}
+
+async function registerToken(request, env) {
+    if (!env.TOKENS) {
+        return json({ error: "TOKENS KV namespace is not configured." }, 500);
+    }
+
+    if (!env.TOKEN_ENCRYPTION_KEY) {
+        return json({ error: "TOKEN_ENCRYPTION_KEY secret is not configured." }, 500);
+    }
+
+    let body;
+    try {
+        body = await request.json();
+    } catch {
+        return json({ error: "Expected a JSON request body." }, 400);
+    }
+
+    const username = String(body.username || "").trim();
+    const token = String(body.token || "").trim();
+
+    if (!/^[a-zA-Z0-9-]{1,39}$/.test(username)) {
+        return json({ error: "Enter a valid GitHub username." }, 400);
+    }
+
+    if (!token || token.length > 500) {
+        return json({ error: "Enter a valid GitHub token." }, 400);
+    }
+
+    const check = await fetch(`${API}/users/${encodeURIComponent(username)}/repos?type=owner&per_page=1`, {
+        headers: { ...BASE_HEADERS, Authorization: `Bearer ${token}` }
+    });
+
+    if (check.status === 401) {
+        return json({ error: "GitHub rejected that token. Check it and try again." }, 400);
+    }
+
+    if (!check.ok) {
+        return json({ error: `GitHub token validation failed (${check.status}).` }, 400);
+    }
+
+    const idBytes = crypto.getRandomValues(new Uint8Array(24));
+    const id = bytesToBase64(idBytes).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
+    const encrypted = await encryptCredentials({ username, token }, env);
+
+    await env.TOKENS.put(id, encrypted, { expirationTtl: TOKEN_TTL });
+
+    return json({
+        id,
+        username,
+        expiresInDays: 90,
+        endpoints: {
+            commits: `/account/total-commits?id=${id}`,
+            files: `/account/total-files?id=${id}`,
+            stars: `/account/total-stars?id=${id}`,
+            forks: `/account/total-forks?id=${id}`,
+            repos: `/account/total-repos?id=${id}`
+        }
+    });
+}
+
+function setupPage() {
+    const html = `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>GitHub Stats Setup</title>
+<style>
+*{box-sizing:border-box}body{margin:0;min-height:100vh;background:#0b1220;color:#e6edf7;font:14px Segoe UI,Arial,sans-serif;display:grid;place-items:center;padding:24px}
+main{width:min(100%,420px);border:1px solid #26364d;background:#101827;padding:24px}
+h1{font-size:20px;margin:0 0 8px}p{color:#8998b5;line-height:1.5;margin:0 0 20px}label{display:block;margin:14px 0 6px;color:#c4d0e3}input{width:100%;padding:11px;background:#0b1220;border:1px solid #34445e;color:#e6edf7;font:inherit;outline:none}input:focus{border-color:#5794ff}button{margin-top:18px;width:100%;padding:11px;border:0;background:#5794ff;color:#07111f;font-weight:700;font-size:14px;cursor:pointer}button:disabled{opacity:.6;cursor:wait}small{display:block;color:#8998b5;line-height:1.5;margin-top:14px}pre{white-space:pre-wrap;overflow-wrap:anywhere;background:#0b1220;border:1px solid #26364d;padding:12px;color:#c4d0e3;display:none;margin-top:16px}#status{margin-top:14px;color:#c4d0e3;overflow-wrap:anywhere}
+a{color:#80aaff}
+</style>
+</head>
+<body>
+<main>
+<h1>GitHub Stats Setup</h1>
+<p>Create a fine-grained GitHub token with read-only access to public repositories. Your token is encrypted before it is stored and is never put in your image URLs.</p>
+<form id="form">
+<label for="username">GitHub username</label>
+<input id="username" name="username" autocomplete="username" required maxlength="39" pattern="[A-Za-z0-9-]+">
+<label for="token">Fine-grained personal access token</label>
+<input id="token" name="token" type="password" autocomplete="off" required>
+<button id="submit" type="submit">Save token</button>
+</form>
+<small>Grant read-only access to repository metadata and contents. Tokens are encrypted with AES-GCM and automatically expire after 90 days. Anyone who can see your public README can reuse its generated ID to request your public stats, but cannot recover your token.</small>
+<div id="status" role="status"></div>
+<pre id="result"></pre>
+</main>
+<script>
+const form=document.getElementById('form');
+const button=document.getElementById('submit');
+const status=document.getElementById('status');
+const result=document.getElementById('result');
+form.addEventListener('submit',async event=>{
+ event.preventDefault();button.disabled=true;status.textContent='Validating and saving token…';result.style.display='none';
+ const username=document.getElementById('username').value.trim();
+ const token=document.getElementById('token').value.trim();
+ try{
+  const response=await fetch('/setup',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({username,token})});
+  const data=await response.json();
+  if(!response.ok)throw new Error(data.error||'Setup failed.');
+  document.getElementById('token').value='';
+  status.textContent='Token saved. Add these image URLs to your README:';
+  const base=location.origin;
+  result.textContent=Object.entries(data.endpoints).map(([name,path])=>name+': '+base+path).join('\\n');
+  result.style.display='block';
+ }catch(error){status.textContent=error.message;}
+ finally{button.disabled=false;}
+});
+</script>
+</body>
+</html>`;
+
+    return new Response(html, {
+        headers: {
+            "Content-Type": "text/html; charset=utf-8",
+            "Cache-Control": "no-store",
+            "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'",
+            "X-Content-Type-Options": "nosniff",
+            "Referrer-Policy": "no-referrer"
+        }
+    });
+}
+
+async function getCredentials(id, env) {
+    if (!id || !/^[A-Za-z0-9_-]{32}$/.test(id)) {
+        throw new Error("A valid setup ID is required. Open /setup first.");
+    }
+
+    if (!env.TOKENS) throw new Error("TOKENS KV namespace is not configured.");
+    const record = await env.TOKENS.get(id);
+    if (!record) throw new Error("Setup ID not found or expired. Open /setup again.");
+    return decryptCredentials(record, env);
+}
+
+async function github(path, token) {
     const response = await fetch(`${API}${path}`, {
-        headers: HEADERS
+        headers: { ...BASE_HEADERS, Authorization: `Bearer ${token}` }
     });
 
     if (!response.ok) {
@@ -100,92 +276,55 @@ async function github(path) {
         const body = await response.text();
 
         if (response.status === 403 || response.status === 429) {
-            throw new Error(
-                `GitHub rate limit reached. Remaining: ${remaining ?? "unknown"}. Reset: ${reset ?? "unknown"}.`
-            );
+            throw new Error(`GitHub rate limit or permission error. Remaining: ${remaining ?? "unknown"}. Reset: ${reset ?? "unknown"}.`);
         }
-
-        if (response.status === 404) {
-            throw new Error("GitHub resource not found.");
-        }
-
-        throw new Error(
-            `GitHub API returned ${response.status}: ${body.slice(0, 300)}`
-        );
+        if (response.status === 401) throw new Error("GitHub rejected the saved token. Create a new token at /setup.");
+        if (response.status === 404) throw new Error("GitHub resource not found.");
+        throw new Error(`GitHub API returned ${response.status}: ${body.slice(0, 200)}`);
     }
 
     return response.json();
 }
 
-async function getRepo(username, repo) {
-    return github(
-        `/repos/${encodeURIComponent(username)}/${encodeURIComponent(repo)}`
-    );
+async function getRepo(username, repo, token) {
+    return github(`/repos/${encodeURIComponent(username)}/${encodeURIComponent(repo)}`, token);
 }
 
-async function getCommitCount(username, repo) {
-    const response = await fetch(
-        `${API}/repos/${encodeURIComponent(username)}/${encodeURIComponent(repo)}/commits?per_page=1`,
-        { headers: HEADERS }
-    );
+async function getCommitCount(username, repo, token) {
+    const response = await fetch(`${API}/repos/${encodeURIComponent(username)}/${encodeURIComponent(repo)}/commits?per_page=1`, {
+        headers: { ...BASE_HEADERS, Authorization: `Bearer ${token}` }
+    });
 
     if (response.status === 409) return 0;
-
     if (!response.ok) {
         const remaining = response.headers.get("X-RateLimit-Remaining");
         const reset = response.headers.get("X-RateLimit-Reset");
-
-        throw new Error(
-            `GitHub commits API returned ${response.status}. Remaining: ${remaining ?? "unknown"}. Reset: ${reset ?? "unknown"}.`
-        );
+        throw new Error(`GitHub commits API returned ${response.status}. Remaining: ${remaining ?? "unknown"}. Reset: ${reset ?? "unknown"}.`);
     }
 
     const link = response.headers.get("Link") || "";
     const lastPage = link.match(/[?&]page=(\d+)[^>]*rel="last"/);
-
-    if (lastPage) {
-        return Number(lastPage[1]);
-    }
+    if (lastPage) return Number(lastPage[1]);
 
     const data = await response.json();
     return Array.isArray(data) ? data.length : 0;
 }
 
-async function getFileCount(username, repo, branch) {
-    const tree = await github(
-        `/repos/${encodeURIComponent(username)}/${encodeURIComponent(repo)}/git/trees/${encodeURIComponent(branch)}?recursive=1`
-    );
-
-    if (!Array.isArray(tree.tree)) {
-        throw new Error("Could not read repository file tree.");
-    }
-
-    if (tree.truncated) {
-        throw new Error("GitHub truncated this repository's file tree.");
-    }
-
+async function getFileCount(username, repo, branch, token) {
+    const tree = await github(`/repos/${encodeURIComponent(username)}/${encodeURIComponent(repo)}/git/trees/${encodeURIComponent(branch)}?recursive=1`, token);
+    if (!Array.isArray(tree.tree)) throw new Error("Could not read repository file tree.");
+    if (tree.truncated) throw new Error("GitHub truncated this repository's file tree.");
     return tree.tree.filter(item => item.type === "blob").length;
 }
 
-async function getRepositories(username) {
+async function getRepositories(username, token) {
     const repos = [];
-
     for (let page = 1; page <= 10; page++) {
-        const data = await github(
-            `/users/${encodeURIComponent(username)}/repos?type=owner&per_page=100&page=${page}`
-        );
-
-        if (!Array.isArray(data)) {
-            throw new Error("Unexpected GitHub repositories response.");
-        }
-
+        const data = await github(`/users/${encodeURIComponent(username)}/repos?type=owner&per_page=100&page=${page}`, token);
+        if (!Array.isArray(data)) throw new Error("Unexpected GitHub repositories response.");
         repos.push(...data);
-
-        if (data.length < 100) {
-            return repos;
-        }
+        if (data.length < 100) return repos;
     }
-
     throw new Error("Account has more than 1,000 public repositories.");
 }
 
@@ -196,102 +335,80 @@ async function runLimited(items, limit, callback) {
     async function worker() {
         while (true) {
             const current = index++;
-
             if (current >= items.length) return;
-
             results[current] = await callback(items[current]);
         }
     }
 
-    await Promise.all(
-        Array.from(
-            { length: Math.min(limit, items.length) },
-            () => worker()
-        )
-    );
-
+    await Promise.all(Array.from({ length: Math.min(limit, items.length) }, () => worker()));
     return results;
 }
 
-async function getTotals(username) {
-    const repos = await getRepositories(username);
-
-    const totals = {
-        repos: repos.length,
-        stars: 0,
-        forks: 0,
-        commits: 0,
-        files: 0
-    };
+async function getTotals(username, token, key) {
+    const repos = await getRepositories(username, token);
+    const totals = { repos: repos.length, stars: 0, forks: 0, commits: 0, files: 0 };
 
     for (const repo of repos) {
         totals.stars += repo.stargazers_count || 0;
         totals.forks += repo.forks_count || 0;
     }
 
-    const stats = await runLimited(repos, 3, async repo => {
-        const [commits, files] = await Promise.all([
-            getCommitCount(repo.owner.login, repo.name),
-            getFileCount(repo.owner.login, repo.name, repo.default_branch)
-        ]);
-
-        return { commits, files };
-    });
-
-    for (const stat of stats) {
-        totals.commits += stat.commits;
-        totals.files += stat.files;
+    if (key === "commits") {
+        const counts = await runLimited(repos, 3, repo => getCommitCount(repo.owner.login, repo.name, token));
+        totals.commits = counts.reduce((sum, count) => sum + count, 0);
+    } else if (key === "files") {
+        const counts = await runLimited(repos, 3, repo => getFileCount(repo.owner.login, repo.name, repo.default_branch, token));
+        totals.files = counts.reduce((sum, count) => sum + count, 0);
     }
 
     return totals;
 }
 
-async function handleRequest(request) {
+async function handleRequest(request, env) {
     const url = new URL(request.url);
     const path = url.pathname.replace(/\/+$/, "") || "/";
-    const username = url.searchParams.get("username");
-    const repo = url.searchParams.get("repo");
+
+    if (path === "/setup" && request.method === "GET") return setupPage();
+    if (path === "/setup" && request.method === "POST") return registerToken(request, env);
 
     if (path === "/" || path === "/api") {
         return json({
             name: "GitHub Stats",
+            setup: "/setup",
+            note: "Create your own encrypted token setup before using statistic image endpoints.",
             repository: {
-                commits: "/repo/commits?username=USER&repo=REPO",
-                files: "/repo/files?username=USER&repo=REPO",
-                stars: "/repo/stars?username=USER&repo=REPO",
-                forks: "/repo/forks?username=USER&repo=REPO",
-                custom: "/repo/custom?username=USER&repo=REPO&text=TEXT"
+                commits: "/repo/commits?id=ID&repo=REPO",
+                files: "/repo/files?id=ID&repo=REPO",
+                stars: "/repo/stars?id=ID&repo=REPO",
+                forks: "/repo/forks?id=ID&repo=REPO",
+                custom: "/repo/custom?text=TEXT&label=OPTIONAL_LABEL"
             },
             account: {
-                totalCommits: "/account/total-commits?username=USER",
-                totalFiles: "/account/total-files?username=USER",
-                totalStars: "/account/total-stars?username=USER",
-                totalForks: "/account/total-forks?username=USER",
-                totalRepos: "/account/total-repos?username=USER",
-                custom: "/account/custom?username=USER&text=TEXT"
+                totalCommits: "/account/total-commits?id=ID",
+                totalFiles: "/account/total-files?id=ID",
+                totalStars: "/account/total-stars?id=ID",
+                totalForks: "/account/total-forks?id=ID",
+                totalRepos: "/account/total-repos?id=ID",
+                custom: "/account/custom?text=TEXT&label=OPTIONAL_LABEL"
             }
         });
     }
 
     if (path.startsWith("/repo/")) {
-        if (!username || !repo) {
-            return json(
-                { error: "username and repo are required." },
-                400
-            );
-        }
-
         const type = path.split("/")[2];
 
         if (type === "custom") {
             const text = url.searchParams.get("text");
             const label = url.searchParams.get("label") || "Custom";
-
-            if (text === null) {
-                return json({ error: "text is required." }, 400);
-            }
-
+            if (text === null) return json({ error: "text is required." }, 400);
             return svgResponse(label, text, "custom");
+        }
+
+        const repo = url.searchParams.get("repo");
+        const id = url.searchParams.get("id");
+
+        if (!repo || !id) {
+            return json({ error: "repo and id are required. Open /setup to create an ID." }, 400);
         }
 
         if (!["commits", "files", "stars", "forks"].includes(type)) {
@@ -299,55 +416,30 @@ async function handleRequest(request) {
         }
 
         try {
-            const data = await getRepo(username, repo);
-
-            const labels = {
-                commits: "Commits",
-                files: "Files",
-                stars: "Stars",
-                forks: "Forks"
-            };
+            const credentials = await getCredentials(id, env);
+            const data = await getRepo(credentials.username, repo, credentials.token);
+            const labels = { commits: "Commits", files: "Files", stars: "Stars", forks: "Forks" };
 
             let value;
 
-            if (type === "stars") {
-                value = data.stargazers_count ?? 0;
-            } else if (type === "forks") {
-                value = data.forks_count ?? 0;
-            } else if (type === "files") {
-                value = await getFileCount(
-                    username,
-                    repo,
-                    data.default_branch
-                );
-            } else {
-                value = await getCommitCount(username, repo);
-            }
+            if (type === "stars") value = data.stargazers_count ?? 0;
+            else if (type === "forks") value = data.forks_count ?? 0;
+            else if (type === "files") value = await getFileCount(credentials.username, repo, data.default_branch, credentials.token);
+            else value = await getCommitCount(credentials.username, repo, credentials.token);
 
             return svgResponse(labels[type], value, type);
         } catch (error) {
-            return json({
-                error: error.message || "Unable to fetch repository statistics.",
-                endpoint: path
-            }, 503);
+            return json({ error: error.message || "Unable to fetch repository statistics.", endpoint: path }, 503);
         }
     }
 
     if (path.startsWith("/account/")) {
-        if (!username) {
-            return json({ error: "username is required." }, 400);
-        }
-
         const type = path.split("/")[2];
 
         if (type === "custom") {
             const text = url.searchParams.get("text");
             const label = url.searchParams.get("label") || "Custom";
-
-            if (text === null) {
-                return json({ error: "text is required." }, 400);
-            }
-
+            if (text === null) return json({ error: "text is required." }, 400);
             return svgResponse(label, text, "custom");
         }
 
@@ -359,13 +451,15 @@ async function handleRequest(request) {
             "total-repos": "repos"
         };
 
-        if (!(type in types)) {
-            return json({ error: "Unknown endpoint." }, 404);
-        }
+        if (!(type in types)) return json({ error: "Unknown endpoint." }, 404);
+
+        const id = url.searchParams.get("id");
+        if (!id) return json({ error: "id is required. Open /setup to create one." }, 400);
 
         try {
-            const totals = await getTotals(username);
+            const credentials = await getCredentials(id, env);
             const key = types[type];
+            const totals = await getTotals(credentials.username, credentials.token, key);
 
             const labels = {
                 commits: "Total commits",
@@ -377,10 +471,7 @@ async function handleRequest(request) {
 
             return svgResponse(labels[key], totals[key], key);
         } catch (error) {
-            return json({
-                error: error.message || "Unable to fetch account statistics.",
-                endpoint: path
-            }, 503);
+            return json({ error: error.message || "Unable to fetch account statistics.", endpoint: path }, 503);
         }
     }
 
@@ -388,20 +479,15 @@ async function handleRequest(request) {
 }
 
 export default {
-    async fetch(request) {
-        if (request.method !== "GET") {
-            return json(
-                { error: "Only GET requests are supported." },
-                405
-            );
+    async fetch(request, env) {
+        if (request.method !== "GET" && !(request.method === "POST" && new URL(request.url).pathname === "/setup")) {
+            return json({ error: "Method not allowed." }, 405);
         }
 
         try {
-            return await handleRequest(request);
+            return await handleRequest(request, env);
         } catch (error) {
-            return json({
-                error: error.message || "Internal error."
-            }, 500);
+            return json({ error: error.message || "Internal error." }, 500);
         }
     }
 };
