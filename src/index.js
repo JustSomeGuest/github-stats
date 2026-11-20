@@ -1,4 +1,4 @@
-const API = "https://api.github.com"; 
+const API = "https://api.github.com";
 
 const BASE_HEADERS = {
     "User-Agent": "github-stats",
@@ -80,6 +80,21 @@ function svgResponse(label, value, type) {
             "Access-Control-Allow-Origin": "*"
         }
     });
+}
+
+function customResponse(url) {
+    const text = url.searchParams.get("text");
+    const label = url.searchParams.get("label");
+
+    if (text === null) {
+        return json({ error: "text is required." }, 400);
+    }
+
+    if (label === null) {
+        return json({ error: "label is required." }, 400);
+    }
+
+    return svgResponse(label, text, "custom");
 }
 
 function bytesToBase64(bytes) {
@@ -303,7 +318,7 @@ async function getCredentials(id, env) {
 
     if (!env.TOKENS) throw new Error("TOKENS KV namespace is not configured.");
     const record = await env.TOKENS.get(id);
-    if (!record) throw new Error("Setup ID not found or expired. Open /setup again.");
+    if (!record) throw new Error("Setup ID not found. Open /setup again.");
     return decryptCredentials(record, env);
 }
 
@@ -422,29 +437,25 @@ async function handleRequest(request, env) {
                 commits: "/repo/commits?id=ID&repo=REPO",
                 files: "/repo/files?id=ID&repo=REPO",
                 stars: "/repo/stars?id=ID&repo=REPO",
-                forks: "/repo/forks?id=ID&repo=REPO",
-                custom: "/repo/custom?text=TEXT&label=OPTIONAL_LABEL"
+                forks: "/repo/forks?id=ID&repo=REPO"
             },
             account: {
                 totalCommits: "/account/total-commits?id=ID",
                 totalFiles: "/account/total-files?id=ID",
                 totalStars: "/account/total-stars?id=ID",
                 totalForks: "/account/total-forks?id=ID",
-                totalRepos: "/account/total-repos?id=ID",
-                custom: "/account/custom?text=TEXT&label=OPTIONAL_LABEL"
-            }
+                totalRepos: "/account/total-repos?id=ID"
+            },
+            custom: "/custom?label=LABEL&text=TEXT"
         });
+    }
+
+    if (path === "/custom") {
+        return customResponse(url);
     }
 
     if (path.startsWith("/repo/")) {
         const type = path.split("/")[2];
-
-        if (type === "custom") {
-            const text = url.searchParams.get("text");
-            const label = url.searchParams.get("label") || "Custom";
-            if (text === null) return json({ error: "text is required." }, 400);
-            return svgResponse(label, text, "custom");
-        }
 
         const repo = url.searchParams.get("repo");
         const id = url.searchParams.get("id");
@@ -477,13 +488,6 @@ async function handleRequest(request, env) {
 
     if (path.startsWith("/account/")) {
         const type = path.split("/")[2];
-
-        if (type === "custom") {
-            const text = url.searchParams.get("text");
-            const label = url.searchParams.get("label") || "Custom";
-            if (text === null) return json({ error: "text is required." }, 400);
-            return svgResponse(label, text, "custom");
-        }
 
         const types = {
             "total-commits": "commits",
