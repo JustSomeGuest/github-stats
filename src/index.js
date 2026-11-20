@@ -1,5 +1,4 @@
 const API = "https://api.github.com"; 
-const TOKEN_TTL = 60 * 60 * 24 * 90;
 
 const BASE_HEADERS = {
     "User-Agent": "github-stats",
@@ -179,12 +178,11 @@ async function registerToken(request, env) {
     const id = bytesToBase64(idBytes).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
     const encrypted = await encryptCredentials({ username, token }, env);
 
-    await env.TOKENS.put(id, encrypted, { expirationTtl: TOKEN_TTL });
+    await env.TOKENS.put(id, encrypted);
 
     return json({
         id,
         username,
-        expiresInDays: 90,
         endpoints: {
             commits: `/account/total-commits?id=${id}`,
             files: `/account/total-files?id=${id}`,
