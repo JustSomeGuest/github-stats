@@ -256,7 +256,7 @@ a{color:#80aaff}
 <button id="submit" type="submit">Save token</button>
 </form>
 
-<small>Your token is encrypted with AES-GCM before being stored. The generated setup ID and its encrypted token record expire after 90 days. This is separate from your GitHub token's expiration setting. Anyone who can see your public README can reuse its generated ID to request your public stats, but cannot recover your token.</small>
+<small>Your token is encrypted with AES-GCM before being stored and does not expire automatically. Anyone who can see your public README can reuse its generated ID to request your public stats, but cannot recover your token.</small>
 <div id="status" role="status"></div>
 <pre id="result"></pre>
 </main>
