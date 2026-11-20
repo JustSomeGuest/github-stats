@@ -3,3 +3,7 @@ main = "src/index.js"
 compatibility_date = "2026-11-20"
 
 workers_dev = true
+
+[[kv_namespaces]]
+binding = "TOKENS"
+id = "657656c6096649be83ddbf606994fe47"
