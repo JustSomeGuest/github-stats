@@ -56,14 +56,20 @@ function iconFor(type) {
 function renderSvg(label, value, type) {
     const safeLabel = escapeXml(label);
     const safeValue = escapeXml(formatNumber(value));
-    const width = Math.max(112, Math.min(230, 43 + safeLabel.length * 5.3 + safeValue.length * 6.8));
 
-    return `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="32" viewBox="0 0 ${width} 32">
-<rect width="${width}" height="32" fill="#101827" stroke="#26364d"/>
-<rect width="2" height="32" fill="#5794ff"/>
-<g transform="translate(8 8)" color="#5794ff"><svg width="16" height="16" viewBox="0 0 24 24">${iconFor(type)}</svg></g>
-<text x="31" y="13" font-family="Segoe UI,Arial,sans-serif" font-size="8.5" fill="#8998b5">${safeLabel}</text>
-<text x="31" y="25" font-family="Segoe UI,Arial,sans-serif" font-size="11" font-weight="600" fill="#e6edf7">${safeValue}</text>
+    const width = Math.max(
+        150,
+        16 + 18 + 12 + safeLabel.length * 7.2 + 10 + safeValue.length * 8.2 + 16
+    );
+
+    return `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="40" viewBox="0 0 ${width} 40">
+<rect width="${width}" height="40" fill="#101827" stroke="#26364d"/>
+<rect width="3" height="40" fill="#5794ff"/>
+<g transform="translate(12 11)" color="#5794ff">
+    <svg width="18" height="18" viewBox="0 0 24 24">${iconFor(type)}</svg>
+</g>
+<text x="42" y="25" font-family="Segoe UI,Arial,sans-serif" font-size="13" fill="#a5b4cc">${safeLabel}</text>
+<text x="${42 + safeLabel.length * 7.2 + 8}" y="25" font-family="Segoe UI,Arial,sans-serif" font-size="14" font-weight="700" fill="#e6edf7">${safeValue}</text>
 </svg>`;
 }
 
