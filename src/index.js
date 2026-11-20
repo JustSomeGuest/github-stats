@@ -52,18 +52,18 @@ function iconFor(type) {
     return icons[type] || icons.custom;
 }
 
-function renderSvg(label, value, type, iconUrl = null) {
+function renderSvg(label, value, type, iconData = null) {
     const safeLabel = escapeXml(label);
     const safeValue = escapeXml(formatNumber(value));
-    const safeIconUrl = iconUrl ? escapeXml(iconUrl) : null;
+    const safeIconData = iconData ? escapeXml(iconData) : null;
 
     const width = Math.max(
         150,
         16 + 18 + 12 + safeLabel.length * 7.2 + 10 + safeValue.length * 8.2 + 16
     );
 
-    const icon = safeIconUrl
-        ? `<image href="${safeIconUrl}" x="12" y="11" width="18" height="18" preserveAspectRatio="xMidYMid meet"/>`
+    const icon = safeIconData
+        ? `<image href="${safeIconData}" x="12" y="11" width="18" height="18" preserveAspectRatio="xMidYMid meet"/>`
         : `<g transform="translate(12 11)" color="#5794ff"><svg width="18" height="18" viewBox="0 0 24 24">${iconFor(type)}</svg></g>`;
 
     return `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="40" viewBox="0 0 ${width} 40">
@@ -85,7 +85,7 @@ function svgResponse(label, value, type, iconUrl = null) {
     });
 }
 
-function customResponse(url) {
+async function customResponse(url) {
     const text = url.searchParams.get("text");
     const label = url.searchParams.get("label");
     const icon = url.searchParams.get("icon");
@@ -98,18 +98,41 @@ function customResponse(url) {
         return json({ error: "label is required." }, 400);
     }
 
+    let iconData = null;
+
     if (icon) {
         try {
             const parsed = new URL(icon);
+
             if (parsed.protocol !== "https:") {
                 return json({ error: "icon must be an HTTPS URL." }, 400);
             }
+
+            const response = await fetch(parsed.toString());
+
+            if (!response.ok) {
+                return json({ error: `Icon fetch failed (${response.status}).` }, 400);
+            }
+
+            const contentType = response.headers.get("content-type") || "";
+
+            if (!contentType.toLowerCase().includes("image/png")) {
+                return json({ error: "Icon must be a PNG image." }, 400);
+            }
+
+            const buffer = await response.arrayBuffer();
+
+            if (buffer.byteLength > 1024 * 1024) {
+                return json({ error: "Icon must be smaller than 1 MB." }, 400);
+            }
+
+            iconData = `data:image/png;base64,${bytesToBase64(new Uint8Array(buffer))}`;
         } catch {
-            return json({ error: "Invalid icon URL." }, 400);
+            return json({ error: "Unable to load icon." }, 400);
         }
     }
 
-    return svgResponse(label, text, "custom", icon);
+    return svgResponse(label, text, "custom", iconData);
 }
 
 function bytesToBase64(bytes) {
