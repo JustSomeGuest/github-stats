@@ -1,4 +1,3 @@
-
 const API = "https://api.github.com";
 const CACHE_TTL = 3600;
 
@@ -37,6 +36,9 @@ const ICONS = {
         <circle cx="17" cy="6" r="2.5"/>
         <path d="M7 8.5v3a4 4 0 0 0 4 4h6M12 15.5V6"/>
     `,
+    custom: `
+        <path d="M4 6h16M4 12h12M4 18h8"/>
+    `,
 };
 
 function json(data, status = 200) {
@@ -63,10 +65,10 @@ function formatNumber(value) {
     return Number(value || 0).toLocaleString("en-US");
 }
 
-function renderSvg(label, value, icon = "files") {
+function renderSvg(label, value, icon = "custom") {
     const safeLabel = escapeXml(label.toUpperCase());
     const safeValue = escapeXml(formatNumber(value));
-    const iconSvg = ICONS[icon] || ICONS.files;
+    const iconSvg = ICONS[icon] || ICONS.custom;
 
     return `<svg xmlns="http://www.w3.org/2000/svg" width="210" height="76" viewBox="0 0 210 76">
 <defs>
@@ -129,7 +131,7 @@ function renderSvg(label, value, icon = "files") {
 </svg>`;
 }
 
-function svgResponse(label, value, icon) {
+function svgResponse(label, value, icon = "custom") {
     return new Response(renderSvg(label, value, icon), {
         headers: {
             "Content-Type": "image/svg+xml; charset=utf-8",
@@ -164,7 +166,6 @@ async function cachedFetch(url, env) {
     if (response.ok) {
         const cacheResponse = new Response(response.clone().body, response);
         cacheResponse.headers.set("Cache-Control", `public, max-age=${CACHE_TTL}`);
-
         await cache.put(cacheKey, cacheResponse);
     }
 
@@ -244,15 +245,12 @@ async function getFileCount(repo, env) {
 }
 
 async function getRepositoryStats(repo, env) {
-    const username = repo.owner.login;
-
     const [commits, files] = await Promise.all([
-        getCommitCount(username, repo.name, env),
+        getCommitCount(repo.owner.login, repo.name, env),
         getFileCount(repo, env),
     ]);
 
     return {
-        name: repo.name,
         commits,
         files,
         stars: repo.stargazers_count,
@@ -284,7 +282,6 @@ async function getTotals(username, env) {
     }
 
     return {
-        username,
         repos: repositories.length,
         commits,
         files,
@@ -312,18 +309,22 @@ async function handleRequest(request, env) {
 
     if (path === "/" || path === "/api") {
         return json({
-            name: "GitHub Stats API",
-            endpoints: [
-                "/api/commits?username=USER&repo=REPO",
-                "/api/files?username=USER&repo=REPO",
-                "/api/stars?username=USER&repo=REPO",
-                "/api/forks?username=USER&repo=REPO",
-                "/api/repos?username=USER",
-                "/api/total-commits?username=USER",
-                "/api/total-files?username=USER",
-                "/api/total-stars?username=USER",
-                "/api/total-forks?username=USER",
-            ],
+            name: "GitHub Stats",
+            repository: {
+                commits: "/repo/commits?username=USER&repo=REPO",
+                files: "/repo/files?username=USER&repo=REPO",
+                stars: "/repo/stars?username=USER&repo=REPO",
+                forks: "/repo/forks?username=USER&repo=REPO",
+                custom: "/repo/custom?username=USER&repo=REPO&text=TEXT",
+            },
+            account: {
+                totalCommits: "/account/total-commits?username=USER",
+                totalFiles: "/account/total-files?username=USER",
+                totalStars: "/account/total-stars?username=USER",
+                totalForks: "/account/total-forks?username=USER",
+                totalRepos: "/account/total-repos?username=USER",
+                custom: "/account/custom?username=USER&text=TEXT",
+            },
         });
     }
 
@@ -332,38 +333,64 @@ async function handleRequest(request, env) {
     }
 
     try {
-        const perRepo = {
-            "/api/commits": ["Commits", "commits"],
-            "/api/files": ["Files", "files"],
-            "/api/stars": ["Stars", "stars"],
-            "/api/forks": ["Forks", "forks"],
+        const repoEndpoints = {
+            "/repo/commits": ["Commits", "commits", "commits"],
+            "/repo/files": ["Files", "files", "files"],
+            "/repo/stars": ["Stars", "stars", "stars"],
+            "/repo/forks": ["Forks", "forks", "forks"],
         };
 
-        if (perRepo[path]) {
+        if (repoEndpoints[path]) {
             if (!repoName) {
                 return json({ error: "Missing repo parameter." }, 400);
             }
 
             const repo = await getRepo(username, repoName, env);
             const stats = await getRepositoryStats(repo, env);
-            const [label, key] = perRepo[path];
+            const [label, key, icon] = repoEndpoints[path];
 
-            return svgResponse(label, stats[key], key);
+            return svgResponse(label, stats[key], icon);
         }
 
-        const totalEndpoints = {
-            "/api/repos": ["Repositories", "repos", "repos"],
-            "/api/total-commits": ["Total Commits", "commits", "commits"],
-            "/api/total-files": ["Total Files", "files", "files"],
-            "/api/total-stars": ["Total Stars", "stars", "stars"],
-            "/api/total-forks": ["Total Forks", "forks", "forks"],
+        if (path === "/repo/custom") {
+            if (!repoName) {
+                return json({ error: "Missing repo parameter." }, 400);
+            }
+
+            const text = url.searchParams.get("text");
+
+            if (text === null) {
+                return json({ error: "Missing text parameter." }, 400);
+            }
+
+            const label = url.searchParams.get("label") || "Custom";
+            return svgResponse(label, text, "custom");
+        }
+
+        const accountEndpoints = {
+            "/account/total-commits": ["Total Commits", "commits", "commits"],
+            "/account/total-files": ["Total Files", "files", "files"],
+            "/account/total-stars": ["Total Stars", "stars", "stars"],
+            "/account/total-forks": ["Total Forks", "forks", "forks"],
+            "/account/total-repos": ["Total Repositories", "repos", "repos"],
         };
 
-        if (totalEndpoints[path]) {
-            const [label, key, icon] = totalEndpoints[path];
+        if (accountEndpoints[path]) {
+            const [label, key, icon] = accountEndpoints[path];
             const totals = await getTotals(username, env);
 
             return svgResponse(label, totals[key], icon);
+        }
+
+        if (path === "/account/custom") {
+            const text = url.searchParams.get("text");
+
+            if (text === null) {
+                return json({ error: "Missing text parameter." }, 400);
+            }
+
+            const label = url.searchParams.get("label") || "Custom";
+            return svgResponse(label, text, "custom");
         }
 
         return json({ error: "Endpoint not found." }, 404);
