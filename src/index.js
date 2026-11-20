@@ -62,7 +62,17 @@ function escapeXml(value) {
 }
 
 function formatNumber(value) {
-    return Number(value || 0).toLocaleString("en-US");
+    if (typeof value === "number") {
+        return value.toLocaleString("en-US");
+    }
+
+    const numeric = Number(value);
+
+    if (String(value).trim() !== "" && Number.isFinite(numeric)) {
+        return numeric.toLocaleString("en-US");
+    }
+
+    return String(value ?? "");
 }
 
 function renderSvg(label, value, icon = "custom") {
