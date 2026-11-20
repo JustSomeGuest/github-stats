@@ -1,15 +1,12 @@
-name: Generate Stats
+name: Generate GitHub Stats
 
-"on":
+on:
   workflow_dispatch:
     inputs:
       username:
-        description: GitHub username to generate stats for
+        description: GitHub username
         required: true
         type: string
-
-permissions:
-  contents: read
 
 jobs:
   generate:
@@ -22,16 +19,16 @@ jobs:
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.x"
+          python-version: "3.12"
 
-      - name: Generate statistics
+      - name: Generate stats
         run: python generate.py "${{ inputs.username }}"
 
-      - name: Render SVG
+      - name: Render SVG cards
         run: python render.py
 
-      - name: Upload SVG
+      - name: Upload SVG cards
         uses: actions/upload-artifact@v4
         with:
-          name: github-stats-svg
-          path: output/stats.svg
+          name: github-stats-${{ inputs.username }}
+          path: output/*.svg
