@@ -1,0 +1,37 @@
+name: Generate Stats
+
+on:
+  workflow_dispatch:
+    inputs:
+      username:
+        description: GitHub username to generate stats for
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  generate:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: Generate statistics
+        run: python generate.py "${{ inputs.username }}"
+
+      - name: Render SVG
+        run: python render.py
+
+      - name: Upload SVG
+        uses: actions/upload-artifact@v4
+        with:
+          name: github-stats-svg
+          path: output/stats.svg
